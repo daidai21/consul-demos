@@ -33,12 +33,25 @@ func New(consulKVClient *api.KV, options ...Option) (Client, error) {
 		consulKVClient: consulKVClient,
 		ttl:            0,
 		debug:          false,
+		useWatch:       false,
 		data:           make(map[string][]byte),
 		setTime:        make(map[string]time.Time),
 	}
 
 	for _, option := range options {
 		c = option(c)
+	}
+
+	if c.useWatch {
+		if watch, e := NewWatcher(consulKVClient, c.pullInterval); e != nil {
+			return nil, e
+		} else {
+			c.watch = watch
+		}
+
+		go func() {
+			c.watchAndUpdate()
+		}()
 	}
 
 	return c, nil
@@ -50,18 +63,27 @@ type client struct {
 	ttl   time.Duration
 	debug bool
 
+	useWatch     bool
+	pullInterval time.Duration
+
 	// 本地缓存配置
-	data    map[string][]byte
-	setTime map[string]time.Time
+	data    map[string][]byte    // 配置数据的本地缓存
+	setTime map[string]time.Time // 更新的时间
 	lock    sync.RWMutex
 
-	// TODO:
 	// 本地watch consul的key变更
-	// 新开一个单独的watcher文件
-	// https://github.com/pteich/consul-kv-watcher/blob/main/watcher.go
+	watch Watcher
 }
 
 func (c *client) Get(key string) (value []byte, err error) {
+	key = KeyPath + key
+
+	// 增加监听的 key
+	if c.useWatch {
+		c.watch.AddKey(key)
+	}
+
+	// 拉取流程
 	if val, e := c.getFromLocalCache(key); e != nil {
 		if val, e := c.getFromConsul(key); e != nil {
 			return nil, e
@@ -109,11 +131,35 @@ func (c *client) getFromConsul(key string) (value []byte, err error) {
 	fmt.Printf("getFromConsul  key=%s\n", key)
 
 	var kvPair *api.KVPair
-	if kvPair, _, err = c.consulKVClient.Get(KeyPath+key, nil); err != nil {
+	if kvPair, _, err = c.consulKVClient.Get(key, nil); err != nil {
 		return nil, err
 	}
 	if kvPair == nil {
 		return nil, nil
 	}
 	return kvPair.Value, nil
+}
+
+// watchAndUpdate 消费 watch 的 chan 更新本地cache
+func (c *client) watchAndUpdate() {
+	for pair := range c.watch.WatchAllKey() {
+		// if c.debug {
+		// 	fmt.Printf("watchAndUpdate  轮训的所有KV  pair=%+v\n", pair)
+		// }
+
+		if val, e := c.getFromLocalCache(pair.Key); e != nil {
+			// FIXME: 优化err case
+			continue
+		} else if EqualSliceByte(val, pair.Value) {
+			// 未更新
+			continue
+		} else {
+			// 更新本地缓存
+			c.setToLocalCache(pair.Key, pair.Value)
+
+			if c.debug {
+				fmt.Printf("watchAndUpdate  更新KV  pair=%+v\n", pair)
+			}
+		}
+	}
 }
