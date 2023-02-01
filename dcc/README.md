@@ -124,3 +124,9 @@ Debugger finished with the exit code 0
      310 total
 
 ```
+
+## Feature
+
+* 轮训拉取最新配置
+* 本地缓存配置
+* [ ] 长轮询
